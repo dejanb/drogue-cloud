@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use actix_web_actors::HttpContext;
 use actix_web::web::Bytes;
 
-use std::{thread, time};
+use std::{time};
 
 #[derive(Clone, Message)]
 #[rtype(result = "()")]
@@ -34,7 +34,7 @@ impl CommandRouter {
 
     fn subscribe(&mut self, id: String, device: Device) {
 
-        log::info!("Sub {}", id);
+        log::debug!("Subscribing device for commands {}", id);
 
         self.devices.insert(id, device);
         
@@ -42,7 +42,7 @@ impl CommandRouter {
 
     fn unsubscribe(&mut self, id: String) {
         
-        log::info!("Unsub");
+        log::info!("Unsubscribing device for commands {}", id);
 
         self.devices.remove(&id);
 
@@ -62,12 +62,12 @@ impl Handler<CommandMessage> for CommandRouter {
     type Result = ();
 
     fn handle(&mut self, msg: CommandMessage, _ctx: &mut Self::Context) -> Self::Result {
-        log::info!("Got it");
 
-        for (id, device) in self.devices.drain() {
-            log::info!("Sending it to device {}", id);
-            device.do_send(msg.to_owned());
-            log::info!("Sent {}", id);
+        for (_id, device) in self.devices.drain() {
+            //TODO send only to appropriate device
+            if let Err(e) = device.do_send(msg.to_owned()) {
+                log::error!("Failed to route command: {}", e);
+            }
         }
     }
 }
@@ -109,27 +109,42 @@ impl Actor for CommandHandler {
     type Context = HttpContext<Self>;
 
     fn started(&mut self, ctx: &mut HttpContext<Self>) {
-       log::info!("Actor is alive");
+        //TODO device-id
         let sub = CommandSubscribe("test".to_string(), ctx.address().recipient());
         CommandRouter::from_registry()
             .send(sub)
             .into_actor(self)
-            .then(|id, act, _ctx| {
-                log::info!("Sent sub!");
+            .then(|result, _actor, _ctx| {
+                match result {
+                    Ok(_v) => {
+                        log::debug!("Sent command subscribe request");
+                    },
+                    Err(e) => {
+                        log::error!("Subscribe request failed: {}", e);
+                    }
+                }
                 fut::ready(())
             })
             .wait(ctx);
-        //ctx.run_later(time::Duration::from_millis(5000), |slf, ctx| slf.write(ctx));
-        ctx.run_later(time::Duration::from_millis(5000), |slf, ctx| ctx.write_eof());
+
+        // Wait for ttd for a command
+        ctx.run_later(time::Duration::from_millis(5000), |_slf, ctx| ctx.write_eof());
     }
 
     fn stopped(&mut self, ctx: &mut HttpContext<Self>) {
-        log::info!("Actor is stopped");
+        //TODO device-id
         CommandRouter::from_registry()
             .send(CommandUnsubscribe("test".to_string()))
             .into_actor(self)
-            .then(|id, act, _ctx| {
-                log::info!("Sent unsub!");
+            .then(|result, _actor, _ctx| {
+                match result {
+                    Ok(_v) => {
+                        log::debug!("Sent command unsubscribe request");
+                    },
+                    Err(e) => {
+                        log::error!("Unsubscribe request failed: {}", e);
+                    }
+                }
                 fut::ready(())
             })
             .wait(ctx);
@@ -140,41 +155,8 @@ impl Handler<CommandMessage> for CommandHandler {
     type Result = ();
 
     fn handle(&mut self, msg: CommandMessage, ctx: &mut HttpContext<Self>) {
-        log::info!("I gotz the message");
         ctx.write(Bytes::from(msg.0));
         ctx.write_eof()
     }
     
-}
-
-pub struct TestHandler;
-
-impl Actor for TestHandler {
-    type Context = Context < Self >;
-
-    fn started( & mut self, ctx: & mut Self::Context) {
-        log::info!("Test actor is alive");
-        let sub = CommandSubscribe("test".to_string(), ctx.address().recipient());
-        CommandRouter::from_registry()
-            .send(sub)
-            .into_actor(self)
-            .then(|id, act, _ctx| {
-                log::info!("Test sent sub!");
-                fut::ready(())
-            })
-            .wait(ctx);
-    }
-
-    fn stopped( & mut self, ctx: & mut Self::Context) {
-        log::info!("Test actor stopped");
-    }
-}
-
-impl Handler<CommandMessage> for TestHandler {
-    type Result = ();
-
-    fn handle(&mut self, msg: CommandMessage, ctx: &mut Context<Self>) {
-        log::info!("Test gotz the message");
-    }
-
 }

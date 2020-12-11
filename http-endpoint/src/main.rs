@@ -1,36 +1,28 @@
-mod basic_auth;
-mod ttn;
-mod command;
-
+use actix::SystemService;
 use actix_web::{
-    get, http::header, middleware, post, put, web, App, HttpResponse, HttpServer, Responder,
+    App, get, http::header, HttpResponse, HttpServer, middleware, post, put, Responder, web,
 };
-
-use drogue_cloud_endpoint_common::downstream::{
-    DownstreamSender, Publish, Outcome, PublishResponse,
-};
-
-use drogue_cloud_endpoint_common::error::HttpEndpointError;
+use actix_web::middleware::Condition;
+use actix_web_actors::HttpContext;
+use actix_web_httpauth::middleware::HttpAuthentication;
+use envconfig::Envconfig;
 use serde::Deserialize;
 use serde_json::json;
 
-use actix_web_httpauth::middleware::HttpAuthentication;
+use command::{CommandMessage, CommandRouter};
 use dotenv::dotenv;
-use envconfig::Envconfig;
+use drogue_cloud_endpoint_common::downstream::{
+    DownstreamSender, Outcome, Publish, PublishResponse,
+};
+use drogue_cloud_endpoint_common::error::HttpEndpointError;
+
+use crate::command::{CommandHandler};
 
 use self::basic_auth::basic_validator;
-use actix_web::middleware::Condition;
-use command::{CommandMessage, CommandRouter};
-use actix::SystemService;
-use actix::Actor;
-use actix::prelude::*;
-use std::{thread, time};
 
-use actix_web_actors::HttpContext;
-use actix_web::body::Body;
-use actix_web::http::{StatusCode};
-
-use crate::command::{CommandHandler, CommandSubscribe, CommandUnsubscribe, TestHandler};
+mod basic_auth;
+mod ttn;
+mod command;
 
 #[derive(Envconfig, Clone, Debug)]
 struct Config {
@@ -82,101 +74,26 @@ async fn publish(
             body,
         )
         .await
-    {
-        // ok, and accepted
-        Ok(PublishResponse {
-            outcome: Outcome::Accepted,
-        }) => {
-            let mut response = HttpResponse::Accepted();
+        {
+            // ok, and accepted
+            Ok(PublishResponse {
+                   outcome: Outcome::Accepted,
+               }) => {
+                let handler = CommandHandler;
+                let context = HttpContext::create(handler);
+                Ok(HttpResponse::Ok().streaming(context))
+            },
 
-            log::info!("Accepted");
+            // ok, but rejected
+            Ok(PublishResponse {
+                   outcome: Outcome::Rejected,
+               }) => Ok(HttpResponse::NotAcceptable().finish()),
 
-            let handler = CommandHandler;
-            let context = HttpContext::create(handler);
-            Ok(HttpResponse::Ok().streaming(context))
-
-//            Ok(HttpResponse::build(StatusCode::OK)
-//                .body(Body::Message(Box::new(context))))
-
-
-//            let handler = TestHandler;
-//            let device = handler.start();
-//            let sub = CommandSubscribe("test".to_string(), device.recipient());
-//            CommandRouter::from_registry()
-//                .send(sub)
-//                .await;
-//
-//
-//            thread::sleep(time::Duration::from_secs(5));
-//
-//            CommandRouter::from_registry()
-//                .send(CommandUnsubscribe("test".to_string()))
-//                .await;
-//
-//            Ok(response.finish())
-
-
-        },
-
-        // ok, but rejected
-        Ok(PublishResponse {
-            outcome: Outcome::Rejected,
-        }) => Ok(HttpResponse::NotAcceptable().finish()),
-
-        // internal error
-        Err(err) => Ok(HttpResponse::InternalServerError()
-            .content_type("text/plain")
-            .body(err.to_string())),
-    }
-
-
-//    let result = endpoint.publish_http(
-//        Publish {
-//            channel,
-//            device_id,
-//            model_id: opts.model_id,
-//            content_type: req
-//                .headers()
-//                .get(header::CONTENT_TYPE)
-//                .and_then(|v| v.to_str().ok())
-//                .map(|s| s.to_string()),
-//        },
-//        body,
-//    ).await;
-//
-//    let device = CommandHandler(HttpResponse::Accepted()).start();
-//    let sub = CommandSubscribe("test".to_string(), device.recipient());
-//    CommandRouter::from_registry()
-//        .send(sub)
-//        .await;
-//
-//    thread::sleep(time::Duration::from_secs(5));
-//
-//    CommandRouter::from_registry()
-//        .send(CommandUnsubscribe("test".to_string()))
-//        .await;
-//
-//
-//
-//    result
-}
-
-
-#[post("/test")]
-async fn test(
-    endpoint: web::Data<DownstreamSender>,
-    web::Query(opts): web::Query<PublishOptions>,
-    req: web::HttpRequest,
-    body: web::Bytes,
-) -> impl Responder {
-    log::info!("Test");
-
-
-    let handler = CommandHandler;
-    let context = HttpContext::create(handler);
-
-    HttpResponse::Ok().streaming(context)
-
+            // internal error
+            Err(err) => Ok(HttpResponse::InternalServerError()
+                .content_type("text/plain")
+                .body(err.to_string())),
+        }
 }
 
 #[put("/telemetry/{tenant}/{device}")]
@@ -208,21 +125,21 @@ async fn telemetry(
 
 #[post("/command-service")]
 async fn command_service(
-    req: web::HttpRequest,
     body: web::Bytes,
 ) -> Result<HttpResponse, actix_web::Error> {
-
-    log::info!("Received command");
 
     let command_msg = CommandMessage(
         String::from_utf8(body.as_ref().to_vec()).unwrap(),
     );
 
-    CommandRouter::from_registry()
+    if let Err(e) = CommandRouter::from_registry()
         .send(command_msg)
-        .await;
-
-    HttpResponse::Ok().await
+        .await {
+        log::error!("Failed to route command: {}", e);
+        HttpResponse::BadRequest().await
+    } else {
+        HttpResponse::Ok().await
+    }
 
 }
 
@@ -231,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     dotenv().ok();
 
-    log::info!("Starting HTTP service endpoint z");
+    log::info!("Starting HTTP service endpoint");
 
     let sender = DownstreamSender::new()?;
 
@@ -251,7 +168,6 @@ async fn main() -> anyhow::Result<()> {
             .service(index)
             .service(publish)
             .service(telemetry)
-            .service(test)
             .service(ttn::publish)
             .service(command_service)
     })
