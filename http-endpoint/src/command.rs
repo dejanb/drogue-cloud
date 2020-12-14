@@ -10,7 +10,10 @@ use std::{time};
 
 #[derive(Clone, Message)]
 #[rtype(result = "()")]
-pub struct CommandMessage(pub String);
+pub struct CommandMessage{
+    pub device_id: String,
+    pub command: String,
+}
 
 #[derive(Clone, Message)]
 #[rtype(result = "()")]
@@ -21,9 +24,7 @@ pub struct CommandSubscribe(pub String, pub Device);
 pub struct CommandUnsubscribe(pub String);
 
 
-
 type Device = Recipient<CommandMessage>;
-//type Room = HashMap<String, Client>;
 
 #[derive(Default)]
 pub struct CommandRouter {
@@ -34,7 +35,7 @@ impl CommandRouter {
 
     fn subscribe(&mut self, id: String, device: Device) {
 
-        log::debug!("Subscribing device for commands {}", id);
+        log::debug!("Subscribing device for commands '{}'", id);
 
         self.devices.insert(id, device);
         
@@ -42,7 +43,7 @@ impl CommandRouter {
 
     fn unsubscribe(&mut self, id: String) {
         
-        log::info!("Unsubscribing device for commands {}", id);
+        log::info!("Unsubscribing device for commands '{}'", id);
 
         self.devices.remove(&id);
 
@@ -63,12 +64,18 @@ impl Handler<CommandMessage> for CommandRouter {
 
     fn handle(&mut self, msg: CommandMessage, _ctx: &mut Self::Context) -> Self::Result {
 
-        for (_id, device) in self.devices.drain() {
-            //TODO send only to appropriate device
-            if let Err(e) = device.do_send(msg.to_owned()) {
-                log::error!("Failed to route command: {}", e);
+        match self.devices.get_mut(&msg.device_id) {
+            Some(device) => {
+                log::debug!("Sending command to the device '{}", msg.device_id);
+                if let Err(e) = device.do_send(msg.to_owned()) {
+                    log::error!("Failed to route command: {}", e);
+                }
+            }
+            _ => {
+                log::debug!("No device '{}' present at this endpoint", &msg.device_id)
             }
         }
+
     }
 }
 
@@ -103,14 +110,15 @@ impl SystemService for CommandRouter {}
 impl Supervised for CommandRouter {}
 
 
-pub struct CommandHandler;
+pub struct CommandHandler{
+    pub device_id: String,
+}
 
 impl Actor for CommandHandler {
     type Context = HttpContext<Self>;
 
     fn started(&mut self, ctx: &mut HttpContext<Self>) {
-        //TODO device-id
-        let sub = CommandSubscribe("test".to_string(), ctx.address().recipient());
+        let sub = CommandSubscribe(self.device_id.clone(), ctx.address().recipient());
         CommandRouter::from_registry()
             .send(sub)
             .into_actor(self)
@@ -134,7 +142,7 @@ impl Actor for CommandHandler {
     fn stopped(&mut self, ctx: &mut HttpContext<Self>) {
         //TODO device-id
         CommandRouter::from_registry()
-            .send(CommandUnsubscribe("test".to_string()))
+            .send(CommandUnsubscribe(self.device_id.clone()))
             .into_actor(self)
             .then(|result, _actor, _ctx| {
                 match result {
@@ -155,7 +163,7 @@ impl Handler<CommandMessage> for CommandHandler {
     type Result = ();
 
     fn handle(&mut self, msg: CommandMessage, ctx: &mut HttpContext<Self>) {
-        ctx.write(Bytes::from(msg.0));
+        ctx.write(Bytes::from(msg.command));
         ctx.write_eof()
     }
     

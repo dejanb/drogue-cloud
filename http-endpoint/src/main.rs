@@ -20,6 +20,9 @@ use crate::command::{CommandHandler};
 
 use self::basic_auth::basic_validator;
 
+use cloudevents::event::ExtensionValue;
+use cloudevents_sdk_actix_web::HttpRequestExt;
+
 mod basic_auth;
 mod ttn;
 mod command;
@@ -63,7 +66,7 @@ async fn publish(
         .publish(
             Publish {
                 channel,
-                device_id,
+                device_id: device_id.to_owned(),
                 model_id: opts.model_id,
                 content_type: req
                     .headers()
@@ -79,7 +82,9 @@ async fn publish(
             Ok(PublishResponse {
                    outcome: Outcome::Accepted,
                }) => {
-                let handler = CommandHandler;
+                let handler = CommandHandler{
+                    device_id: device_id.to_owned(),
+                };
                 let context = HttpContext::create(handler);
                 Ok(HttpResponse::Ok().streaming(context))
             },
@@ -126,19 +131,37 @@ async fn telemetry(
 #[post("/command-service")]
 async fn command_service(
     body: web::Bytes,
+    req: web::HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
 
-    let command_msg = CommandMessage(
-        String::from_utf8(body.as_ref().to_vec()).unwrap(),
-    );
+    let request_event = req.to_event(payload).await?;
 
-    if let Err(e) = CommandRouter::from_registry()
-        .send(command_msg)
-        .await {
-        log::error!("Failed to route command: {}", e);
-        HttpResponse::BadRequest().await
-    } else {
-        HttpResponse::Ok().await
+    log::debug!("Received Event: {:?}", request_event);
+
+    let device_id_ext = request_event.extension("device_id");
+
+    match device_id_ext {
+        Some(ExtensionValue::String(device_id)) => {
+
+            let command_msg = CommandMessage {
+                device_id: device_id.to_string(),
+                command: String::from_utf8(body.as_ref().to_vec()).unwrap(),
+            };
+
+            if let Err(e) = CommandRouter::from_registry()
+                .send(command_msg)
+                .await {
+                log::error!("Failed to route command: {}", e);
+                HttpResponse::BadRequest().await
+            } else {
+                HttpResponse::Ok().await
+            }
+        }
+        _ => {
+            log::error!("No device-id provided");
+            HttpResponse::BadRequest().await
+        }
     }
 
 }
