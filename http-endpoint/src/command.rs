@@ -112,13 +112,14 @@ impl Supervised for CommandRouter {}
 
 pub struct CommandHandler{
     pub device_id: String,
+    pub ttd: u64,
 }
 
 impl Actor for CommandHandler {
     type Context = HttpContext<Self>;
 
     fn started(&mut self, ctx: &mut HttpContext<Self>) {
-        let sub = CommandSubscribe(self.device_id.clone(), ctx.address().recipient());
+        let sub = CommandSubscribe(self.device_id.to_owned(), ctx.address().recipient());
         CommandRouter::from_registry()
             .send(sub)
             .into_actor(self)
@@ -135,14 +136,13 @@ impl Actor for CommandHandler {
             })
             .wait(ctx);
 
-        // Wait for ttd for a command
-        ctx.run_later(time::Duration::from_millis(5000), |_slf, ctx| ctx.write_eof());
+        // Wait for ttd seconds for a command
+        ctx.run_later(time::Duration::from_secs(self.ttd), |_slf, ctx| ctx.write_eof());
     }
 
     fn stopped(&mut self, ctx: &mut HttpContext<Self>) {
-        //TODO device-id
         CommandRouter::from_registry()
-            .send(CommandUnsubscribe(self.device_id.clone()))
+            .send(CommandUnsubscribe(self.device_id.to_owned()))
             .into_actor(self)
             .then(|result, _actor, _ctx| {
                 match result {

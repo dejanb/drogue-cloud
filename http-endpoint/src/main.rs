@@ -1,6 +1,6 @@
 use actix::SystemService;
 use actix_web::{
-    App, get, http::header, HttpResponse, HttpServer, middleware, post, put, Responder, web,
+    App, get, http::header, HttpResponse, HttpServer, middleware, post, put, Responder, web, http,
 };
 use actix_web::middleware::Condition;
 use actix_web_actors::HttpContext;
@@ -50,6 +50,7 @@ async fn health() -> impl Responder {
 #[derive(Deserialize)]
 pub struct PublishOptions {
     model_id: Option<String>,
+    ttd: Option<u64>,
 }
 
 #[post("/publish/{device_id}/{channel}")]
@@ -81,24 +82,46 @@ async fn publish(
             // ok, and accepted
             Ok(PublishResponse {
                    outcome: Outcome::Accepted,
-               }) => {
-                let handler = CommandHandler{
-                    device_id: device_id.to_owned(),
-                };
-                let context = HttpContext::create(handler);
-                Ok(HttpResponse::Ok().streaming(context))
-            },
+               }) =>
+                {
+                    command_wait(device_id, opts.ttd, http::StatusCode::ACCEPTED).await
+                },
 
             // ok, but rejected
             Ok(PublishResponse {
                    outcome: Outcome::Rejected,
-               }) => Ok(HttpResponse::NotAcceptable().finish()),
+               }) =>
+                {
+                    command_wait(device_id, opts.ttd, http::StatusCode::NOT_ACCEPTABLE).await
+                },
 
             // internal error
             Err(err) => Ok(HttpResponse::InternalServerError()
                 .content_type("text/plain")
                 .body(err.to_string())),
         }
+}
+
+async fn command_wait(
+    device_id: String,
+    ttd_param: Option<u64>,
+    status: http::StatusCode,
+) -> Result<HttpResponse, HttpEndpointError> {
+
+    match ttd_param {
+        Some(ttd) => {
+            let handler = CommandHandler {
+                device_id: device_id.to_owned(),
+                ttd: ttd,
+            };
+            let context = HttpContext::create(handler);
+            Ok(HttpResponse::build(status).streaming(context))
+        }
+        _ => {
+            Ok(HttpResponse::build(status).finish())
+        }
+    }
+
 }
 
 #[put("/telemetry/{tenant}/{device}")]
