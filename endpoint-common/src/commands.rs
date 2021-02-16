@@ -27,19 +27,25 @@ impl Commands {
     }
 
     pub async fn send(&self, msg: Command) -> Result<(), String> {
-        println!("Sending");
         let device = { self.devices.lock().unwrap().get(&msg.device_id).cloned() };
         if let Some(sender) = device {
             match sender.send(msg.command).await {
                 Ok(_) => {
-                    println!("OK");
+                    log::debug!("Command sent to device {:?}", msg.device_id);
+                    Ok(())
                 }
-                Err(_) => {
-                    println!("ERR");
+                Err(e) => {
+                    log::error!("Failed to send a command {:?}", e);
+                    Err(e.to_string())
                 }
-            };
+            }
+        } else {
+            log::debug!(
+                "Failed to route command: No device {:?} found on this endpoint!",
+                msg.device_id
+            );
+            Err("Device not found".to_string())
         }
-        Ok(())
     }
 
     pub fn subscribe(&self, device_id: Id) -> Receiver<String>{
@@ -49,13 +55,14 @@ impl Commands {
             device_id.clone(),
             tx.clone(),
         );
-        println!("Sub {:?}",  device_id);
+        log::debug!("Device {:?} subscribed to receive commands",  device_id);
         rx
     }
 
     pub fn unsubscribe(&self, device_id: Id) {
         let mut devices = self.devices.lock().unwrap();
         devices.remove(&device_id.clone());
+        log::debug!("Device {:?} unsubscribed from receiving commands",  device_id);
     }
 
 }
@@ -67,7 +74,7 @@ mod test {
 
     #[tokio::test]
     async fn test_timeout() {
-
+        env_logger::init();
         let id = Id::new("test", "test");
 
         let commands = Commands::new();
