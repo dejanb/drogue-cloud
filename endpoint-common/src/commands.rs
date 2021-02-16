@@ -6,11 +6,21 @@ use std::{
 use crate::Id;
 use tokio::sync::mpsc::{channel, Sender, Receiver};
 
-/// Represents command message passed to the actors
+/// Represents command
 #[derive(Clone)]
 pub struct Command {
     pub device_id: Id,
     pub command: String,
+}
+
+impl Command {
+    /// Create a new scoped Command
+    pub fn new<C: ToString>(device_id: Id, command: C) -> Self {
+        Self {
+            device_id: device_id,
+            command: command.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -29,9 +39,9 @@ impl Commands {
     pub async fn send(&self, msg: Command) -> Result<(), String> {
         let device = { self.devices.lock().unwrap().get(&msg.device_id).cloned() };
         if let Some(sender) = device {
-            match sender.send(msg.command).await {
+            match sender.send(msg.command.clone()).await {
                 Ok(_) => {
-                    log::debug!("Command sent to device {:?}", msg.device_id);
+                    log::debug!("Command {:?} sent to device {:?}", msg.command.clone(), msg.device_id);
                     Ok(())
                 }
                 Err(e) => {
@@ -74,27 +84,58 @@ mod test {
 
     #[tokio::test]
     async fn test_timeout() {
-        env_logger::init();
-        let id = Id::new("test", "test");
+        let _ = env_logger::try_init();
+        let id = Id::new("test-timeout", "test");
 
         let commands = Commands::new();
-        let msg = Command {
-            device_id: id.clone(),
-            command: "test".to_string(),
-        };
 
         let mut receiver = commands.subscribe(id.clone());
 
-        let success_handle = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let cmd = timeout(Duration::from_secs(1), receiver.recv()).await;
+            log::info!("Received {:?}", cmd);
             assert_eq!(cmd, Ok(Some("test".to_string())));
             let cmd2 = timeout(Duration::from_secs(1), receiver.recv()).await;
+            log::info!("Received {:?}", cmd2);
             assert_eq!(cmd2.is_err(), true);
         });
 
-        commands.clone().send(msg.clone()).await.ok();
+        commands.send(Command::new(id.clone(), "test".to_string())).await.ok();
 
-        success_handle.await.unwrap();
+        handle.await.unwrap();
+
+    }
+
+    #[tokio::test]
+    async fn test_stream() {
+        let _ = env_logger::try_init();
+        let id = Id::new("test-stream", "test");
+
+        let commands = Commands::new();
+
+        let mut receiver = commands.subscribe(id.clone());
+
+        let handle = tokio::spawn(async move {
+            for i in 0..5 {
+                let cmd = receiver.recv().await;
+                log::info!("Received {:?}", cmd);
+                assert_eq!(cmd, Some(format!("test{}", i).to_string()));
+            }
+            let cmd2 = receiver.recv().await;
+            log::info!("Received {:?}", cmd2);
+            assert_eq!(cmd2, None);
+        });
+
+        commands.send(Command::new(id.clone(), "test0".to_string())).await.ok();
+        commands.send(Command::new(id.clone(), "test1".to_string())).await.ok();
+        commands.send(Command::new(id.clone(), "test2".to_string())).await.ok();
+        commands.send(Command::new(id.clone(), "test3".to_string())).await.ok();
+        commands.send(Command::new(id.clone(), "test4".to_string())).await.ok();
+
+         commands.unsubscribe(id.clone());
+         commands.send(Command::new(id.clone(), "test5".to_string())).await.ok();
+
+        handle.await.unwrap();
 
     }
 
